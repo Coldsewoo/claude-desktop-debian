@@ -4,6 +4,7 @@ build_*/
 
 # Dev folder
 .dev/
+.history/
 
 # Reference implementation
 reference/

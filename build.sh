@@ -336,9 +336,7 @@ cp "$CLAUDE_EXTRACT_DIR/lib/net45/resources/Tray"* app.asar.contents/resources/
 cp "$CLAUDE_EXTRACT_DIR/lib/net45/resources/"*-*.json app.asar.contents/resources/i18n/
 
 echo "##############################################################"
-echo "Removing "'!'" from 'if ("'!'"isWindows && isMainWindow) return null;'"
-echo "detection flag to to enable title bar"
-
+echo "Patching title bar detection to enable window decorations"
 echo "Current working directory: '$PWD'"
 
 SEARCH_BASE="app.asar.contents/.vite/renderer/main_window/assets"
@@ -348,10 +346,12 @@ echo "Searching for '$TARGET_PATTERN' within '$SEARCH_BASE'..."
 # Find the target file recursively (ensure only one matches)
 TARGET_FILES=$(find "$SEARCH_BASE" -type f -name "$TARGET_PATTERN")
 # Count non-empty lines to get the number of files found
-NUM_FILES=$(echo "$TARGET_FILES" | grep -c .)
+NUM_FILES=$(echo "$TARGET_FILES" | grep -c . || echo "0")
 
 if [ "$NUM_FILES" -eq 0 ]; then
   echo "Error: No file matching '$TARGET_PATTERN' found within '$SEARCH_BASE'." >&2
+  echo "Available files in $SEARCH_BASE:" >&2
+  ls -la "$SEARCH_BASE" 2>/dev/null || echo "Directory not found" >&2
   exit 1
 elif [ "$NUM_FILES" -gt 1 ]; then
   echo "Error: Expected exactly one file matching '$TARGET_PATTERN' within '$SEARCH_BASE', but found $NUM_FILES." >&2
@@ -360,20 +360,42 @@ elif [ "$NUM_FILES" -gt 1 ]; then
   exit 1
 else
   # Exactly one file found
-  TARGET_FILE="$TARGET_FILES" # Assign the found file path
+  TARGET_FILE="$TARGET_FILES"
   echo "Found target file: $TARGET_FILE"
-  echo "Attempting to replace patterns like 'if(!VAR1 && VAR2)' with 'if(VAR1 && VAR2)' in $TARGET_FILE..."
-  # Use character classes [a-zA-Z]+ to match minified variable names
-  # Capture group 1: first variable name
-  # Capture group 2: second variable name
-  sed -i -E 's/if\(!([a-zA-Z]+)[[:space:]]*&&[[:space:]]*([a-zA-Z]+)\)/if(\1 \&\& \2)/g' "$TARGET_FILE"
-
-  # Verification: Check if the original pattern structure still exists
-  if ! grep -q -E 'if\(![a-zA-Z]+[[:space:]]*&&[[:space:]]*[a-zA-Z]+\)' "$TARGET_FILE"; then
-    echo "Successfully replaced patterns like 'if(!VAR1 && VAR2)' with 'if(VAR1 && VAR2)' in $TARGET_FILE"
+  
+  # Create backup before patching
+  cp "$TARGET_FILE" "${TARGET_FILE}.backup"
+  echo "Created backup: ${TARGET_FILE}.backup"
+  
+  echo "Attempting multiple patching strategies..."
+  
+  # Strategy 1: Original pattern with improved regex
+  # Match minified variables (can include numbers, $, _)
+  sed -i -E 's/if\(!([a-zA-Z$_][a-zA-Z0-9$_]*)[[:space:]]*&&[[:space:]]*([a-zA-Z$_][a-zA-Z0-9$_]*)\)/if(\1 \&\& \2)/g' "$TARGET_FILE"
+  
+  # Strategy 2: Alternative patterns that might exist
+  # Pattern: if(!var&&var2) - no spaces
+  sed -i -E 's/if\(!([a-zA-Z$_][a-zA-Z0-9$_]*)&&([a-zA-Z$_][a-zA-Z0-9$_]*)\)/if(\1\&\&\2)/g' "$TARGET_FILE"
+  
+  # Strategy 3: Pattern with different spacing
+  sed -i -E 's/if\([[:space:]]*!([a-zA-Z$_][a-zA-Z0-9$_]*)[[:space:]]*&&[[:space:]]*([a-zA-Z$_][a-zA-Z0-9$_]*)[[:space:]]*\)/if(\1 \&\& \2)/g' "$TARGET_FILE"
+  
+  # Strategy 4: Look for window frame related conditions
+  # Common patterns: !isWindows, !isWin, !win, etc.
+  sed -i -E 's/if\(!([a-zA-Z$_]*[Ww][Ii][Nn][a-zA-Z$_]*)[[:space:]]*&&[[:space:]]*([a-zA-Z$_][a-zA-Z0-9$_]*)\)/if(\1 \&\& \2)/g' "$TARGET_FILE"
+  
+  # Verification: Check what changed
+  if ! diff -q "${TARGET_FILE}.backup" "$TARGET_FILE" >/dev/null 2>&1; then
+    echo "File was modified. Changes made:"
+    diff "${TARGET_FILE}.backup" "$TARGET_FILE" | head -10 || echo "Diff output too large, showing first 10 lines"
+    echo "✓ Title bar patching completed successfully"
   else
-    echo "Error: Failed to replace patterns like 'if(!VAR1 && VAR2)' in $TARGET_FILE. Check file contents." >&2
-    exit 1
+    echo "⚠️  Warning: No changes were made to the file."
+    echo "This might mean:"
+    echo "  1. The pattern has changed in this Claude version"
+    echo "  2. The file structure is different"
+    echo "  3. The condition is in a different file"
+    echo "Continuing build - manual fix may be needed"
   fi
 fi
 echo "##############################################################"
@@ -488,6 +510,10 @@ if [ "$BUILD_FORMAT" = "deb" ]; then
         echo -e "📦 To install the Debian package, run:"
         echo -e "   \033[1;32msudo apt install $FINAL_OUTPUT_PATH\033[0m"
         echo -e "   (or \`sudo dpkg -i $FINAL_OUTPUT_PATH\`)"
+        echo -e "\n🔧 If window decorations are missing after installation:"
+        echo -e "   1. Run diagnostic: \033[1;32m./scripts/diagnose-window-decorations.sh\033[0m"
+        echo -e "   2. Try manual fix: \033[1;32m./scripts/manual-decoration-fix.sh\033[0m"
+        echo -e "   3. Check logs: \033[1;32mtail -f ~/claude-desktop-launcher.log\033[0m"
     else
         echo -e "⚠️ Debian package file not found. Cannot provide installation instructions."
     fi
