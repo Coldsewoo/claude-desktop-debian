@@ -89,26 +89,49 @@ fi
 # Set up environment variables if needed (e.g., LD_LIBRARY_PATH)
 # export LD_LIBRARY_PATH="\$APPDIR/usr/lib:\$LD_LIBRARY_PATH"
 
-# Detect if Wayland is likely running
-IS_WAYLAND=false
-if [ ! -z "\$WAYLAND_DISPLAY" ]; then
-  IS_WAYLAND=true
-fi
+# Utility function to get desktop-specific flags
+get_desktop_flags() {
+    local desktop_env="\${XDG_CURRENT_DESKTOP:-Unknown}"
+    local session_type="\${XDG_SESSION_TYPE:-x11}"
+    local is_wayland=false
+    [ -n "\$WAYLAND_DISPLAY" ] && is_wayland=true
+    
+    case "\$desktop_env" in
+        "Unity"|"ubuntu:Unity")
+            export UBUNTU_MENUPROXY=1
+            unset WAYLAND_DISPLAY
+            echo "--class=claude-desktop --name=Claude Desktop --force-desktop-shell --disable-features=VaapiVideoDecoder,UseOzonePlatform --use-gl=desktop --gtk-version=3"
+            ;;
+        "GNOME"|"ubuntu:GNOME")
+            if [ "\$is_wayland" = true ]; then
+                echo "--enable-features=UseOzonePlatform,WaylandWindowDecorations --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3 --gtk-version=3 --class=claude-desktop"
+            else
+                echo "--class=claude-desktop --force-desktop-shell --disable-features=VaapiVideoDecoder --use-gl=desktop --gtk-version=3"
+            fi
+            ;;
+        "KDE")
+            echo "--class=claude-desktop --gtk-version=3"
+            ;;
+        *)
+            if [ "\$is_wayland" = true ]; then
+                echo "--enable-features=UseOzonePlatform,WaylandWindowDecorations --ozone-platform=wayland --enable-wayland-ime --wayland-text-input-version=3 --class=claude-desktop --gtk-version=3"
+            else
+                echo "--class=claude-desktop --gtk-version=3"
+            fi
+            ;;
+    esac
+}
 
-# Path to the bundled Electron executable
-# Use the path relative to AppRun within the 'electron/dist' module directory
+# Set up execution environment
+DESKTOP_ENV="\${XDG_CURRENT_DESKTOP:-Unknown}"
 ELECTRON_EXEC="\$APPDIR/usr/lib/node_modules/electron/dist/electron"
 APP_PATH="\$APPDIR/usr/lib/app.asar"
 
-# Base command arguments array
-# Add --no-sandbox flag to avoid sandbox issues within AppImage
+# Build command arguments
+DESKTOP_FLAGS=\$(get_desktop_flags)
 ELECTRON_ARGS=("--no-sandbox" "\$APP_PATH")
-
-# Add Wayland flags if Wayland is detected
-if [ "\$IS_WAYLAND" = true ]; then
-  echo "AppRun: Wayland detected, adding flags."
-  ELECTRON_ARGS+=("--enable-features=UseOzonePlatform,WaylandWindowDecorations" "--ozone-platform=wayland" "--enable-wayland-ime" "--wayland-text-input-version=3")
-fi
+IFS=' ' read -r -a FLAGS <<< "\$DESKTOP_FLAGS"
+ELECTRON_ARGS+=("\${FLAGS[@]}")
 
 # Change to the application resources directory (where app.asar is)
 cd "\$APPDIR/usr/lib" || exit 1
@@ -119,9 +142,8 @@ LOG_FILE="\$HOME/claude-desktop-launcher.log"
 # Change to HOME directory before exec'ing Electron to avoid CWD permission issues
 cd "\$HOME" || exit 1
 
-# Execute Electron with app path, flags, and script arguments passed to AppRun
-# Redirect stdout and stderr to the log file (append)
-echo "AppRun: Executing \$ELECTRON_EXEC \${ELECTRON_ARGS[@]} \$@ >> \$LOG_FILE 2>&1"
+# Log startup and execute
+echo "\$(date): Starting Claude Desktop AppImage (\$DESKTOP_ENV)" >> "\$LOG_FILE"
 exec "\$ELECTRON_EXEC" "\${ELECTRON_ARGS[@]}" "\$@" >> "\$LOG_FILE" 2>&1
 EOF
 chmod +x "$APPDIR_PATH/AppRun"

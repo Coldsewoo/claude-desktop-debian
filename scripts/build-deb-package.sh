@@ -89,181 +89,119 @@ echo "🚀 Creating enhanced launcher script with multi-environment support..."
 cat > "$INSTALL_DIR/bin/claude-desktop" << EOF
 #!/bin/bash
 LOG_FILE="\$HOME/claude-desktop-launcher.log"
-echo "--- Claude Desktop Launcher Start ---" >> "\$LOG_FILE"
-echo "Timestamp: \$(date)" >> "\$LOG_FILE"
-echo "Arguments: \$@" >> "\$LOG_FILE"
 
-# Detect desktop environment and display server
+# Utility functions
+verify_claude_window() {
+    local window_id="\$1"
+    xprop -id "\$window_id" WM_CLASS 2>/dev/null | grep -qi "claude"
+}
+
+get_desktop_flags() {
+    local flags=()
+    case "\$DESKTOP_ENV" in
+        "Unity"|"ubuntu:Unity")
+            flags=("--class=claude-desktop" "--name=Claude Desktop" "--force-desktop-shell" 
+                   "--disable-features=VaapiVideoDecoder,UseOzonePlatform" "--use-gl=desktop" 
+                   "--gtk-version=3" "--no-sandbox" "--disable-dev-shm-usage")
+            export UBUNTU_MENUPROXY=1
+            unset WAYLAND_DISPLAY
+            ;;
+        "GNOME"|"ubuntu:GNOME")
+            if [ "\$SESSION_TYPE" = "wayland" ] && [ -n "\$WAYLAND_DISPLAY" ]; then
+                flags=("--enable-features=UseOzonePlatform,WaylandWindowDecorations" 
+                       "--ozone-platform=wayland" "--enable-wayland-ime" "--gtk-version=3" "--class=claude-desktop")
+            else
+                flags=("--class=claude-desktop" "--force-desktop-shell" "--disable-features=VaapiVideoDecoder" 
+                       "--use-gl=desktop" "--gtk-version=3" "--no-sandbox")
+            fi
+            ;;
+        "KDE")
+            flags=("--class=claude-desktop" "--gtk-version=3" "--no-sandbox")
+            ;;
+        *)
+            flags=("--class=claude-desktop" "--gtk-version=3" "--no-sandbox" "--disable-dev-shm-usage")
+            ;;
+    esac
+    printf '%s\n' "\${flags[@]}"
+}
+
+apply_window_decorations() {
+    local window_id="\$1"
+    local desktop_env="\$2"
+    
+    if ! verify_claude_window "\$window_id"; then
+        return 1
+    fi
+    
+    # Common properties
+    xprop -id "\$window_id" -f _MOTIF_WM_HINTS 32c -set _MOTIF_WM_HINTS "0x2, 0x0, 0x1, 0x0, 0x0" 2>/dev/null || true
+    xprop -id "\$window_id" -set WM_CLASS "claude-desktop,Claude Desktop" 2>/dev/null || true
+    xprop -id "\$window_id" -set _NET_WM_WINDOW_TYPE "_NET_WM_WINDOW_TYPE_NORMAL" 2>/dev/null || true
+    
+    # Desktop-specific properties
+    case "\$desktop_env" in
+        "Unity"|"ubuntu:Unity")
+            xprop -id "\$window_id" -set _UNITY_OBJECT_PATH "/com/canonical/menu/\$(echo \$window_id | sed 's/0x//')" 2>/dev/null || true
+            ;;
+        "GNOME"|"ubuntu:GNOME")
+            xprop -id "\$window_id" -set _GTK_MENUBAR_OBJECT_PATH "/org/gtk/Application/menu" 2>/dev/null || true
+            xprop -id "\$window_id" -set _GTK_APPLICATION_OBJECT_PATH "/org/gtk/Application" 2>/dev/null || true
+            wmctrl -i -r "\$window_id" -b add,demands_attention 2>/dev/null || true
+            sleep 0.2
+            wmctrl -i -r "\$window_id" -b remove,demands_attention 2>/dev/null || true
+            ;;
+    esac
+}
+
+# Detect desktop environment
 DESKTOP_ENV="\${XDG_CURRENT_DESKTOP:-Unknown}"
 SESSION_TYPE="\${XDG_SESSION_TYPE:-x11}"
-echo "Desktop Environment: \$DESKTOP_ENV" >> "\$LOG_FILE"
-echo "Session Type: \$SESSION_TYPE" >> "\$LOG_FILE"
+echo "\$(date): Starting Claude Desktop (\$DESKTOP_ENV/\$SESSION_TYPE)" >> "\$LOG_FILE"
 
-# Determine Electron executable path
-ELECTRON_EXEC="electron" # Default to global
+# Determine Electron executable
 LOCAL_ELECTRON_PATH="/usr/lib/$PACKAGE_NAME/node_modules/electron/dist/electron"
 if [ -f "\$LOCAL_ELECTRON_PATH" ]; then
     ELECTRON_EXEC="\$LOCAL_ELECTRON_PATH"
-    echo "Using local Electron: \$ELECTRON_EXEC" >> "\$LOG_FILE"
+elif command -v electron &> /dev/null; then
+    ELECTRON_EXEC="electron"
 else
-    # Check if global electron exists before declaring it as the choice
-    if command -v electron &> /dev/null; then
-        echo "Using global Electron: \$ELECTRON_EXEC" >> "\$LOG_FILE"
-    else
-        echo "Error: Electron executable not found (checked local \$LOCAL_ELECTRON_PATH and global path)." >> "\$LOG_FILE"
-        # Optionally, display an error to the user via zenity or kdialog if available
-        if command -v zenity &> /dev/null; then
-            zenity --error --text="Claude Desktop cannot start because the Electron framework is missing. Please ensure Electron is installed globally or reinstall Claude Desktop."
-        elif command -v kdialog &> /dev/null; then
-            kdialog --error "Claude Desktop cannot start because the Electron framework is missing. Please ensure Electron is installed globally or reinstall Claude Desktop."
-        fi
-        exit 1
-    fi
+    echo "Error: Electron not found" >> "\$LOG_FILE"
+    command -v zenity &> /dev/null && zenity --error --text="Electron framework missing. Install Electron or reinstall Claude Desktop."
+    command -v kdialog &> /dev/null && kdialog --error "Electron framework missing. Install Electron or reinstall Claude Desktop."
+    exit 1
 fi
 
-# Base command arguments array, starting with app path
+# Build command arguments
 APP_PATH="/usr/lib/$PACKAGE_NAME/app.asar"
-ELECTRON_ARGS=("\$APP_PATH")
+mapfile -t DESKTOP_FLAGS < <(get_desktop_flags)
+ELECTRON_ARGS=("\$APP_PATH" "\${DESKTOP_FLAGS[@]}")
 
-# Add window decoration flags based on desktop environment
-case "\$DESKTOP_ENV" in
-    "Unity"|"ubuntu:Unity")
-        echo "Applying Unity-specific window decoration flags (X11 only)" >> "\$LOG_FILE"
-        # Unity always uses X11, so force X11 mode and disable Wayland
-        ELECTRON_ARGS+=(
-            "--class=claude-desktop"
-            "--name=Claude Desktop"
-            "--force-desktop-shell"
-            "--disable-features=VaapiVideoDecoder,UseOzonePlatform"
-            "--use-gl=desktop"
-            "--gtk-version=3"
-            "--no-sandbox"
-            "--disable-dev-shm-usage"
-        )
-        # Set Unity-specific environment
-        export UBUNTU_MENUPROXY=1
-        # Force X11 environment
-        unset WAYLAND_DISPLAY
-        ;;
-    "GNOME"|"ubuntu:GNOME")
-        echo "Applying GNOME-specific window decoration flags" >> "\$LOG_FILE"
-        if [ "\$SESSION_TYPE" = "wayland" ] && [ -n "\$WAYLAND_DISPLAY" ]; then
-            echo "Using Wayland mode for GNOME" >> "\$LOG_FILE"
-            ELECTRON_ARGS+=(
-                "--enable-features=UseOzonePlatform,WaylandWindowDecorations"
-                "--ozone-platform=wayland"
-                "--enable-wayland-ime"
-                "--gtk-version=3"
-                "--class=claude-desktop"
-            )
-        else
-            echo "Using X11 mode for GNOME" >> "\$LOG_FILE"
-            ELECTRON_ARGS+=(
-                "--class=claude-desktop"
-                "--force-desktop-shell"
-                "--disable-features=VaapiVideoDecoder"
-                "--use-gl=desktop"
-                "--gtk-version=3"
-                "--no-sandbox"
-            )
-        fi
-        ;;
-    "KDE")
-        echo "Applying KDE-specific window decoration flags" >> "\$LOG_FILE"
-        ELECTRON_ARGS+=(
-            "--class=claude-desktop"
-            "--gtk-version=3"
-            "--no-sandbox"
-        )
-        ;;
-    *)
-        echo "Applying generic window decoration flags for \$DESKTOP_ENV" >> "\$LOG_FILE"
-        # Generic fallback - minimal flags for maximum compatibility
-        ELECTRON_ARGS+=(
-            "--class=claude-desktop"
-            "--gtk-version=3"
-            "--no-sandbox"
-            "--disable-dev-shm-usage"
-        )
-        ;;
-esac
-
-# Change to the application directory
-APP_DIR="/usr/lib/$PACKAGE_NAME"
-echo "Changing directory to \$APP_DIR" >> "\$LOG_FILE"
-cd "\$APP_DIR" || { echo "Failed to cd to \$APP_DIR" >> "\$LOG_FILE"; exit 1; }
-
-# Execute Electron with app path, flags, and script arguments
-FINAL_CMD="\"\$ELECTRON_EXEC\" \"\${ELECTRON_ARGS[@]}\" \"\$@\""
-echo "Executing: \$FINAL_CMD" >> "\$LOG_FILE"
+# Change to application directory and launch
+cd "/usr/lib/$PACKAGE_NAME" || { echo "Failed to cd" >> "\$LOG_FILE"; exit 1; }
 
 # Launch Claude Desktop
 "\$ELECTRON_EXEC" "\${ELECTRON_ARGS[@]}" "\$@" &
 CLAUDE_PID=\$!
 
-# Apply window decoration rules based on environment
-if [ "\$DESKTOP_ENV" = "Unity" ] || [ "\$DESKTOP_ENV" = "ubuntu:Unity" ]; then
-    echo "Applying Unity window decoration rules..." >> "\$LOG_FILE"
-    (
-        sleep 4
-        
-        # Find Claude Desktop windows
-        CLAUDE_WINDOWS=\$(wmctrl -l 2>/dev/null | grep -i "claude" | awk '{print \$1}')
-        
-        for window_id in \$CLAUDE_WINDOWS; do
-            if [ -n "\$window_id" ]; then
-                echo "Applying Unity rules to window: \$window_id" >> "\$LOG_FILE"
-                
-                # Unity-specific window decoration rules
-                xprop -id "\$window_id" -f _MOTIF_WM_HINTS 32c -set _MOTIF_WM_HINTS "0x2, 0x0, 0x1, 0x0, 0x0" 2>/dev/null || true
-                xprop -id "\$window_id" -set WM_CLASS "claude-desktop,Claude Desktop" 2>/dev/null || true
-                xprop -id "\$window_id" -set _NET_WM_WINDOW_TYPE "_NET_WM_WINDOW_TYPE_NORMAL" 2>/dev/null || true
-                xprop -id "\$window_id" -set _UNITY_OBJECT_PATH "/com/canonical/menu/\$(echo \$window_id | sed 's/0x//')" 2>/dev/null || true
-            fi
-        done
-    ) &
-elif [ "\$DESKTOP_ENV" = "GNOME" ] || [ "\$DESKTOP_ENV" = "ubuntu:GNOME" ]; then
-    echo "Applying GNOME window decoration rules..." >> "\$LOG_FILE"
-    (
-        sleep 3
-        
-        # Find Claude Desktop windows
-        CLAUDE_WINDOWS=\$(wmctrl -l 2>/dev/null | grep -i "claude" | awk '{print \$1}')
-        
-        for window_id in \$CLAUDE_WINDOWS; do
-            if [ -n "\$window_id" ]; then
-                echo "Applying GNOME rules to window: \$window_id" >> "\$LOG_FILE"
-                
-                # GNOME-specific window decoration rules
-                xprop -id "\$window_id" -f _MOTIF_WM_HINTS 32c -set _MOTIF_WM_HINTS "0x2, 0x0, 0x1, 0x0, 0x0" 2>/dev/null || true
-                xprop -id "\$window_id" -set WM_CLASS "claude-desktop,Claude Desktop" 2>/dev/null || true
-                xprop -id "\$window_id" -set _NET_WM_WINDOW_TYPE "_NET_WM_WINDOW_TYPE_NORMAL" 2>/dev/null || true
-                
-                # GNOME menu bar integration
-                xprop -id "\$window_id" -set _GTK_MENUBAR_OBJECT_PATH "/org/gtk/Application/menu" 2>/dev/null || true
-                xprop -id "\$window_id" -set _GTK_APPLICATION_OBJECT_PATH "/org/gtk/Application" 2>/dev/null || true
-                
-                # Force window decoration refresh
-                wmctrl -i -r "\$window_id" -b add,demands_attention 2>/dev/null || true
-                sleep 0.2
-                wmctrl -i -r "\$window_id" -b remove,demands_attention 2>/dev/null || true
-            fi
-        done
-        
-        # Run GNOME menu bar fix if available
-        if command -v claude-gnome-menubar-fix &> /dev/null; then
-            echo "Running GNOME menu bar fix script..." >> "\$LOG_FILE"
-            claude-gnome-menubar-fix >> "\$LOG_FILE" 2>&1 || true
+# Apply window decorations after startup delay
+(
+    sleep 3
+    CLAUDE_WINDOWS=\$(wmctrl -l 2>/dev/null | grep -E "(Claude|claude-desktop)" | awk '{print \$1}')
+    
+    for window_id in \$CLAUDE_WINDOWS; do
+        if apply_window_decorations "\$window_id" "\$DESKTOP_ENV"; then
+            echo "\$(date): Applied decorations to \$window_id" >> "\$LOG_FILE"
         fi
-    ) &
-fi
+    done
+    
+    # Run additional fix script if available
+    command -v claude-gnome-menubar-fix &> /dev/null && claude-gnome-menubar-fix >> "\$LOG_FILE" 2>&1 || true
+) &
 
-# Wait for Claude Desktop to finish
+# Wait for application exit
 wait \$CLAUDE_PID
-EXIT_CODE=\$?
-echo "Electron exited with code: \$EXIT_CODE" >> "\$LOG_FILE"
-echo "--- Claude Desktop Launcher End ---" >> "\$LOG_FILE"
-exit \$EXIT_CODE
+echo "\$(date): Claude Desktop exited (code: \$?)" >> "\$LOG_FILE"
+exit \$?
 EOF
 chmod +x "$INSTALL_DIR/bin/claude-desktop"
 echo "✓ Enhanced launcher script created with multi-environment support"
@@ -273,112 +211,48 @@ echo "🔧 Creating GNOME menu bar fix script..."
 cat > "$INSTALL_DIR/local/bin/claude-gnome-menubar-fix" << 'EOF'
 #!/bin/bash
 
-# GNOME Menu Bar Fix for Running Claude Desktop
-# Comprehensive fix for GNOME window decorations and menu bar
+verify_claude_window() {
+    xprop -id "$1" WM_CLASS 2>/dev/null | grep -qi "claude"
+}
 
-echo "🔧 GNOME Menu Bar Fix for Claude Desktop"
-
-# Check if Claude Desktop is running
-if ! pgrep -f "claude-desktop" > /dev/null; then
-    echo "❌ Claude Desktop is not running"
-    echo "   Start Claude Desktop first: claude-desktop"
-    exit 1
-fi
-
-echo "✓ Claude Desktop is running"
-
-# Wait a moment for windows to stabilize
-sleep 2
-
-# Find Claude Desktop windows
-echo "🔍 Finding Claude Desktop windows..."
-CLAUDE_WINDOWS=$(wmctrl -l 2>/dev/null | grep -i "claude" | awk '{print $1}')
-
-if [ -z "$CLAUDE_WINDOWS" ]; then
-    echo "❌ No Claude Desktop windows found"
-    echo "   Make sure Claude Desktop is fully loaded"
-    exit 1
-fi
-
-echo "✓ Found Claude Desktop windows: $CLAUDE_WINDOWS"
-
-# Apply GNOME-specific window decoration rules
-for window_id in $CLAUDE_WINDOWS; do
-    echo "🔧 Processing window: $window_id"
+apply_gnome_decorations() {
+    local window_id="$1"
     
-    # Get current window title for confirmation
-    WINDOW_TITLE=$(xprop -id "$window_id" WM_NAME 2>/dev/null | cut -d'"' -f2 2>/dev/null || echo "Unknown")
-    echo "   Window title: $WINDOW_TITLE"
-    
-    # Force window decorations and menu bar
-    echo "   Setting window decorations..."
+    # Core GNOME properties
     xprop -id "$window_id" -f _MOTIF_WM_HINTS 32c -set _MOTIF_WM_HINTS "0x2, 0x0, 0x1, 0x0, 0x0" 2>/dev/null || true
-    
-    # Set proper window class
-    echo "   Setting window class..."
     xprop -id "$window_id" -set WM_CLASS "claude-desktop,Claude Desktop" 2>/dev/null || true
-    
-    # Force normal window type
-    echo "   Setting window type..."
     xprop -id "$window_id" -set _NET_WM_WINDOW_TYPE "_NET_WM_WINDOW_TYPE_NORMAL" 2>/dev/null || true
     
     # GNOME menu bar integration
-    echo "   Setting GNOME menu bar properties..."
     xprop -id "$window_id" -set _GTK_MENUBAR_OBJECT_PATH "/org/gtk/Application/menu" 2>/dev/null || true
     xprop -id "$window_id" -set _GTK_APPLICATION_OBJECT_PATH "/org/gtk/Application" 2>/dev/null || true
-    
-    # Force window state changes to trigger decoration refresh
-    echo "   Refreshing window decorations..."
-    wmctrl -i -r "$window_id" -b add,demands_attention 2>/dev/null || true
-    sleep 0.3
-    wmctrl -i -r "$window_id" -b remove,demands_attention 2>/dev/null || true
-    
-    # Remove any problematic window states
-    echo "   Normalizing window state..."
-    wmctrl -i -r "$window_id" -b remove,fullscreen 2>/dev/null || true
-    wmctrl -i -r "$window_id" -b remove,above 2>/dev/null || true
-    wmctrl -i -r "$window_id" -b remove,below 2>/dev/null || true
-    
-    echo "   ✓ GNOME rules applied to window $window_id"
-done
-
-echo
-echo "🎯 Additional GNOME menu bar attempts..."
-
-# Try GNOME-specific approaches
-for window_id in $CLAUDE_WINDOWS; do
-    echo "🔄 Attempting GNOME menu integration for window: $window_id"
-    
-    # Try to force GTK menu bar visibility
-    xprop -id "$window_id" -set _GTK_MENUBAR_OBJECT_PATH "/org/gtk/Application/menu/$(echo $window_id | sed 's/0x//')" 2>/dev/null || true
     xprop -id "$window_id" -set _GTK_APP_MENU_OBJECT_PATH "/org/gtk/Application/appmenu" 2>/dev/null || true
-    
-    # Try window manager hints for GNOME
-    xprop -id "$window_id" -set _NET_WM_STATE "_NET_WM_STATE_FOCUSED" 2>/dev/null || true
-    
-    # Force CSD (Client Side Decorations) properties
     xprop -id "$window_id" -set _GTK_CSD "1" 2>/dev/null || true
+    
+    # Refresh decorations
+    wmctrl -i -r "$window_id" -b add,demands_attention 2>/dev/null || true
+    sleep 0.2
+    wmctrl -i -r "$window_id" -b remove,demands_attention 2>/dev/null || true
+    wmctrl -i -r "$window_id" -b remove,fullscreen,above,below 2>/dev/null || true
+}
+
+# Check if Claude Desktop is running
+pgrep -f "claude-desktop" > /dev/null || { echo "Claude Desktop not running"; exit 1; }
+
+sleep 2
+CLAUDE_WINDOWS=$(wmctrl -l 2>/dev/null | grep -E "(Claude|claude-desktop)" | awk '{print $1}')
+
+[ -z "$CLAUDE_WINDOWS" ] && { echo "No Claude Desktop windows found"; exit 1; }
+
+echo "Applying GNOME menu bar fixes..."
+for window_id in $CLAUDE_WINDOWS; do
+    if verify_claude_window "$window_id"; then
+        apply_gnome_decorations "$window_id"
+        echo "Applied fixes to window: $window_id"
+    fi
 done
 
-echo
-echo "✅ GNOME menu bar fix applied!"
-echo
-echo "📋 What was done:"
-echo "  • Applied MOTIF window hints for decorations"
-echo "  • Set proper window class and type"
-echo "  • Added GTK menu bar integration properties"
-echo "  • Forced window decoration refresh"
-echo "  • Applied GNOME-specific menu bar hints"
-echo
-echo "🔧 If menu bar still doesn't appear:"
-echo "  1. Try keyboard shortcut: Alt+F10"
-echo "  2. Check GNOME settings: Settings → Appearance"
-echo "  3. Try: gsettings set org.gnome.desktop.wm.preferences button-layout 'close,minimize,maximize:'"
-echo "  4. Restart Claude Desktop for automatic fixes"
-echo
-echo "📝 GNOME Menu Bar Settings:"
-echo "  • Check: Settings → Appearance → Window title bars"
-echo "  • Ensure: Show window title bars is enabled"
+echo "Menu bar fix complete. Try Alt+F10 if menu doesn't appear."
 EOF
 chmod +x "$INSTALL_DIR/local/bin/claude-gnome-menubar-fix"
 echo "✓ GNOME menu bar fix script created"
@@ -387,8 +261,6 @@ echo "✓ GNOME menu bar fix script created"
 echo "🔍 Creating universal desktop diagnostic script..."
 cat > "$INSTALL_DIR/local/bin/claude-desktop-diagnostic" << 'EOF'
 #!/bin/bash
-
-# Universal Desktop Environment Diagnostic for Claude Desktop
 echo "🔍 Claude Desktop Environment Diagnostic"
 echo
 
@@ -464,7 +336,7 @@ done
 # Find Claude Desktop windows
 echo
 echo "🪟 Claude Desktop Windows:"
-CLAUDE_WINDOWS=$(wmctrl -l 2>/dev/null | grep -i "claude")
+CLAUDE_WINDOWS=$(wmctrl -l 2>/dev/null | grep -E "(Claude|claude-desktop)")
 
 if [ -z "$CLAUDE_WINDOWS" ]; then
     echo "❌ No Claude Desktop windows found with wmctrl"
@@ -475,7 +347,7 @@ fi
 # Get detailed window information
 echo
 echo "📊 Window Details:"
-wmctrl -l | grep -i "claude" | while read line; do
+wmctrl -l | grep -E "(Claude|claude-desktop)" | while read line; do
     window_id=$(echo "$line" | awk '{print $1}')
     echo "Window ID: $window_id"
     
